@@ -154,7 +154,20 @@ If non-nil, save highscores in the file given."
 		 file)
   :group 'typing-of-emacs)
 
-;; Parsing the buffer
+(defface toe-praise
+  '((t (:inherit font-lock-keyword-face)))
+  "Face for praise."
+  :group 'typing-of-emacs)
+
+(defface toe-criticism
+  '((t (:inherit font-lock-warning-face)))
+  "Face for criticism."
+  :group 'typing-of-emacs)
+
+(defface toe-status
+  '((t (:inherit font-lock-string-face)))
+  "Face for status."
+  :group 'typing-of-emacs)
 
 (defun toe-parse-region-words (start end)
   "Return words from the region as an alist.
@@ -240,8 +253,9 @@ Answers are the sentences following a question."
   "Print status line."
   (if (not (bolp))
       (newline))
-  (insert (format "\nLEVEL %d: %d SECONDS PER WORD!  YOU HAVE %d LIVES LEFT.\n" 
-		  toe-level toe-time-per-word toe-lives)))
+  (insert (propertize (format "\nLEVEL %d: %d SECONDS PER WORD!  YOU HAVE %d LIVES LEFT.\n"
+			      toe-level toe-time-per-word toe-lives)
+		      'face 'toe-status)))
 
 (defun toe-setup-buffer ()
   "Create and switch to new buffer."
@@ -263,33 +277,33 @@ Answers are the sentences following a question."
   (insert question)
   (with-timeout
       (toe-time-per-word
-       (insert " - Timeout!")
+       (insert (propertize " - Timeout!" 'face 'toe-criticism))
        (toe-failure))
     (let ((str (read-string "Go ahead, type: ")))
       (if (string-equal str answer)
 	  (toe-success)
-	(insert " - " str "?")
+	(insert (propertize (concat " - " str "?") 'face 'toe-criticism))
 	(toe-failure)))))
 
 (defun toe-success ()
   "Give success feedback."
-  (toe-feedback toe-success-messages)
+  (toe-feedback toe-success-messages 'face 'toe-praise)
   'success)
 
 (defun toe-failure ()
   "Give failure feedback."
-  (toe-feedback toe-failure-messages)
+  (toe-feedback toe-failure-messages 'face 'toe-criticism)
   ;; dynamic binding!
   (setq toe-lives (1- toe-lives))
-  (insert (format " - %d LIVES LEFT!" toe-lives))
+  (insert (propertize (format " - %d LIVES LEFT!" toe-lives) 'face 'toe-criticism))
   (if (> toe-lives 0) 'success 'failure))
 
-(defun toe-feedback (stuff)
+(defun toe-feedback (stuff &rest props)
   "Give feedback by choosing a random phrase from STUFF."
   (let ((feedback (elt stuff (random (length stuff)))))
     (when (featurep 'emacspeak)
       (dtk-speak feedback))
-    (insert " - " feedback)))
+    (insert (apply #'propertize (cons (concat " - " feedback) props)))))
 
 ;; Only way to get out of the game
 
