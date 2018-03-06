@@ -2,6 +2,7 @@
 
 ;; Copyright (C)  2000, 2001  Alex Schroeder <alex@gnu.org>
 ;; Zombie mode and Q&A game (c) 2011 Sacha Chua <sacha@sachachua.com>
+;; Training game (C) 2018 Gemini Lasswell <gazally@runbox.com>
 
 ;; Author: Alex Schroeder <alex@gnu.org>
 ;; Maintainer: Alex Schroeder <alex@gnu.org>
@@ -75,6 +76,10 @@
   "Typing of Emacs."
   :version "20.6"
   :group 'games)
+
+(defgroup typing-of-emacs-training nil
+  "Keyboard training mode of Typing of Emacs."
+  :group 'typing-of-emacs)
 
 (defcustom toe-words-per-level 5
   "*Number of words you have to type to complete a level."
@@ -153,6 +158,61 @@ If non-nil, save highscores in the file given."
   :type '(choice (const :tag "No persistent highscores" nil)
 		 file)
   :group 'typing-of-emacs)
+
+(defcustom toe-give-score-in-wpm nil
+  "How to report typing speed in the scores.
+Non-nil means use words per minute, using the standard definition
+of 5 characters per word, and nil, the default, means to use
+characters per minute."
+  :type '(choice (const :tag "CPM" nil)
+		 (const :tag "WPM" t))
+  :group 'typing-of-emacs)
+
+(defcustom toe-training-phrases-per-level 5
+  "*Number of phrases you have to type to complete a level."
+  :type 'number
+  :group 'typing-of-emacs-training)
+
+(defcustom toe-time-per-phrase 20
+  "Number of seconds to type a phrase."
+  :type 'number
+  :group 'typing-of-emacs-training)
+
+(defcustom toe-minimum-fragment-size 3
+  "Minimum size of a word fragment."
+  :type 'number
+  :group 'typing-of-emacs-training)
+
+(defcustom toe-maximum-fragment-size 6
+  "Maximum size of a word fragment."
+  :type 'number
+  :group 'typing-of-emacs-training)
+
+(defcustom toe-phrase-length 7
+  "Number of word fragments in a phrase."
+  :type 'number
+  :group 'typing-of-emacs-training)
+
+(defcustom toe-training-starting-level 1
+  "Level to start at when the game begins in training mode.
+This is the same as the number of most frequent chars which will
+be in the words presented. So starting at 1 is not very interesting."
+  :type 'number
+  :group 'typing-of-emacs-training)
+
+(defcustom toe-starting-focus-count 3
+  "Number of characters to focus on at once, in training mode.
+Each word in the phrase will contain at least one of this many
+of the least frequent characters in the subset of characters
+presented."
+  :type 'number
+  :group 'typing-of-emacs-training)
+
+(defvar toe-current-char-count nil
+  "Number of characters (of the most frequent) that will be presented.")
+
+(defvar toe-current-focus-count nil
+  "Number of characters (of the least frequent of those presented) which will be in every fragment.")
 
 (defface toe-praise
   '((t (:inherit font-lock-keyword-face)))
@@ -244,6 +304,56 @@ Answers are the sentences following a question."
   (list (toe-parse-region-words start end)
 	(toe-parse-region-questions start end)))
 
+(defun toe-parse-region-fragments (start end)
+  "Parse region and return fragments of words."
+  (save-excursion
+    (goto-char start)
+    (let ((wordhash (make-hash-table :test 'equal))
+	  (fragment-hash (make-hash-table :test 'equal))
+	  char-freq-alist chars-sorted-by-freq words fragments)
+      ;; Find all the unique words in the region.
+      (while (re-search-forward "[[:graph:]]+" end t)
+	(setf (gethash (match-string-no-properties 0) wordhash)
+	      (1+ (gethash (match-string-no-properties 0) wordhash 0))))
+
+      ;; Make a list of unique words and an alist with characters
+      ;; and the number of times they were seen.
+      (maphash (lambda (word count)
+		 (let ((chars (append (downcase word) nil)))
+		   (dolist (char chars)
+		     (let ((previous (cdr (assq char char-freq-alist))))
+		       (if previous
+			   (setf (cdr (assq char char-freq-alist))
+				 (+ previous count))
+			 (push (cons char 0) char-freq-alist)))))
+		 (push word words))
+	       wordhash)
+      (setq chars-sorted-by-freq
+	    (mapcar #'car (sort char-freq-alist
+				(lambda (a b) (> (cdr a) (cdr b))))))
+      ;; From each word create fragments of sizes up to the
+      ;; maximum. Fragments shorter than the minimum needed in the
+      ;; case when the number of characters being shown is less than
+      ;; toe-minimum-fragment-size. Removing short fragments which are
+      ;; not needed is done by toe-filter-fragments.
+      (dolist (word words)
+	(let ((fragment-size 1)
+	      (len (length word)))
+	  (while (<= fragment-size toe-maximum-fragment-size)
+	    (if (<= len fragment-size)
+		(setf (gethash word fragment-hash) t)
+	      (dotimes (pos (- len fragment-size))
+		(setf (gethash (substring word pos (+ pos fragment-size)) fragment-hash) t)))
+	    (setq fragment-size (1+ fragment-size)))))
+
+      ;; Make a list of unique fragments.
+      (maphash (lambda (fragment _) (push fragment fragments))
+	       fragment-hash)
+
+      ;; Return the list of characters sorted by frequency and
+      ;; the list of fragments.
+      (list chars-sorted-by-freq fragments))))
+
 ;; Setting up the game buffer
 
 (defvar toe-level 1
@@ -257,13 +367,20 @@ Answers are the sentences following a question."
 			      toe-level toe-time-per-word toe-lives)
 		      'face 'toe-status)))
 
+(defun toe-status-training ()
+  "Print status line for training version of game."
+  (unless (bolp)
+    (newline))
+  (insert (propertize (format "\nLEVEL %d: YOU HAVE %d LIVES LEFT.\n"
+			      toe-current-char-count toe-lives)
+		      'face 'toe-status)))
+
 (defun toe-setup-buffer ()
   "Create and switch to new buffer."
   (switch-to-buffer (get-buffer-create toe-buffer-name))
   (setq buffer-read-only nil)
   (erase-buffer)
-  (insert "T h e   T y p i n g   O f   E m a c s . . .\n")
-  (toe-status))
+  (insert "T h e   T y p i n g   O f   E m a c s . . .\n"))
 
 ;; Asking for stuff and giving feedback
 
@@ -318,9 +435,12 @@ START and END are times such as returned by
     (let* ((time (+ (* (expt 2 16)
 		       (- (nth 0 end) (nth 0 start)))
 		    (- (nth 1 end) (nth 1 start))))
-	   (score (if (> time 0) (/ (* 60 letters) time) 0)))
-      (insert (format "You have reached %d characters per minute in %d seconds by typing %d words."
-		      score time words))
+	   (score (if (> time 0) (/ (* 60 letters) time) 0))
+	   (speed (if toe-give-score-in-wpm
+		      (format "%d words" (/ score 5))
+		    (format "%d characters" score))))
+      (insert (format "You have reached %s per minute in %d seconds by typing %d words."
+		      speed time words))
       (message "Updating highscores...")
       (if (and toe-highscore-file (file-readable-p toe-highscore-file))
 	  (with-temp-buffer
@@ -339,9 +459,12 @@ START and END are times such as returned by
       (while (< count 20)
 	(let ((x (elt highscores count)))
 	  (if x
-	      (insert (format "%3d. %.20s %5d cpm  %5d sec  %5d words  %s\n"
-			      (1+ count) (nth 0 x) (nth 1 x) (nth 2 x) (nth 3 x) 
-			      (format-time-string "%Y-%m-%d %H:%M" (nth 4 x)))))
+	      (let ((speed (if toe-give-score-in-wpm
+			       (format "%5d wpm" (/ (nth 1 x) 5))
+			     (format "%5d cpm" (nth 1 x)))))
+		(insert (format "%3d. %.20s %s  %5d sec  %5d words  %s\n"
+				(1+ count) (nth 0 x) speed (nth 2 x) (nth 3 x)
+				(format-time-string "%Y-%m-%d %H:%M" (nth 4 x))))))
 	  (setq count (1+ count))))))
   (if (get-buffer toe-buffer-name)
       (view-buffer toe-buffer-name 'kill-buffer)))
@@ -375,6 +498,48 @@ second."
 	(error "Internal error in the typing game"))
     (copy-sequence words)))
 
+(defun toe-make-phrases (chars-freq fragments)
+  "Make random phrases out of the fragments given."
+  (let ((filtered (toe-filter-fragments chars-freq fragments)))
+    (when filtered
+      (let ((count (length filtered))
+	    results)
+	(dotimes (_ toe-training-phrases-per-level)
+	  (let (words)
+	    (dotimes (__ toe-phrase-length)
+	      (push (nth (random count) filtered) words))
+	    (push (mapconcat #'identity words " ") results)))
+	results))))
+
+(defun toe-filter-fragments (chars-freq fragments)
+  (let* ((char-count (length chars-freq))
+	 (minimum (min toe-current-char-count toe-minimum-fragment-size))
+	 (permissible (butlast chars-freq (max 0 (- char-count toe-current-char-count))))
+	 (required (last permissible toe-current-focus-count)))
+    (delq nil (mapcar (lambda (fragment)
+			(let ((downcased (downcase fragment)))
+			  (and (>= (length fragment) minimum)
+			       (toe-contains-only-chars-p downcased permissible)
+			       (toe-contains-any-char-p downcased required)
+			       fragment)))
+		      fragments))))
+
+(defun toe-contains-only-chars-p (fragment permissible)
+  "Return non-nil if FRAGMENT contains only characters in PERMISSIBLE.
+FRAGMENT should be a string and PERMISSIBLE a list."
+  (catch 'return
+    (dolist (char (append fragment nil) t)
+      (unless (memq char permissible)
+	(throw 'return nil)))))
+
+(defun toe-contains-any-char-p (fragment required)
+  "Return non-nil if FRAGMENT contains any character in REQUIRED.
+FRAGMENT should be a string and PERMISSIBLE a list."
+  (catch 'return
+    (dolist (char (append fragment nil) nil)
+      (when (memq char required)
+	(throw 'return t)))))
+
 (defun typing-of-emacs-questions (&optional zombie)
   "Play the game The Typing of Emacs, Q&A version."
   (interactive "P")
@@ -394,6 +559,7 @@ second."
     (if (null question-alist)
 	(error "No usable questions found in this buffer"))
     (toe-setup-buffer)
+    (toe-status)
     (while (if zombie game-in-progress (eq game-in-progress 'success))
       ;; Choose new and longer word list if is exhausted
       (or questions (setq toe-length (1+ toe-length)
@@ -410,7 +576,56 @@ second."
 	    (setq level-word-count 0
 		  questions nil))))
     (toe-score letter-count total-word-count game-start (current-time))))
-  
+
+(defun typing-of-emacs-training (&optional zombie)
+  "Play the game the Typing of Emacs, keyboard training version.
+The game builds a list of words from the current buffer,
+separated by whitespace and including all punctuation.  In the
+buffer *The Typing Of Emacs*, you will be asked to type gibberish
+phrases constructed from parts of words separated by
+spaces.  Character frequency in the source text is used for
+difficulty.  The level number is equal to the number of the most
+frequent characters which will appear in the phrases presented."
+  (interactive "P")
+  (if (string-equal (buffer-name) toe-buffer-name)
+      (progn
+	(set-buffer-modified-p nil)
+	(kill-buffer (current-buffer))))
+  (let* ((toe-level 1)
+	 (toe-current-char-count toe-training-starting-level)
+	 (toe-current-focus-count toe-starting-focus-count)
+	 (toe-time-per-word toe-time-per-phrase)
+	 (toe-lives toe-starting-lives)
+	 (parsed (toe-parse-region-fragments (point-min) (point-max)))
+	 (chars-freq (nth 0 parsed))
+	 (fragments (nth 1 parsed))
+	 (words (toe-make-phrases chars-freq fragments))
+	 (game-start (current-time)) (game-in-progress 'success)
+	 (letter-count 0) (total-word-count 0) (level-word-count 0))
+    (if (null words)
+	(error "No usable words found in this buffer"))
+    (toe-setup-buffer)
+    (toe-status-training)
+    (while (if zombie game-in-progress (eq game-in-progress 'success))
+      ;; When words exhausted, add a less frequent character
+      ;; and generate new words.
+      (unless words
+	(setq toe-current-char-count (1+ toe-current-char-count)
+	      words (toe-make-phrases chars-freq fragments))
+	(toe-status-training))
+      ;; Choose a word from the list and require user to type it.
+      (let ((word (elt words (random (length words)))))
+	(if (eq (setq game-in-progress (toe-ask-for word)) 'success)
+	    (setq letter-count (+ letter-count (length word))
+		  total-word-count (+ total-word-count toe-phrase-length)
+		  level-word-count (1+ level-word-count)
+		  words (delete word words)))
+	;; If next level is reached, force finding of new words.
+	(if (>= level-word-count toe-words-per-level)
+	    (setq level-word-count 0
+		  words nil))))
+    (toe-score letter-count total-word-count game-start (current-time)))  )
+
 ;; Main entry point
 ;;;###autoload
 (defun typing-of-emacs (&optional zombie)
@@ -436,6 +651,7 @@ continue playing the words will get longer and longer."
     (if (null word-alist)
 	(error "No usable words found in this buffer"))
     (toe-setup-buffer)
+    (toe-status)
     (while (if zombie game-in-progress (eq game-in-progress 'success))
       ;; Choose new and longer word list if is exhausted
       (or words (setq toe-length (1+ toe-length)
